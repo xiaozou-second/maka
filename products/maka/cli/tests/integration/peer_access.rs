@@ -17,8 +17,7 @@
  * under the License.
  */
 
-#[path = "../support/host.rs"]
-mod host;
+use crate::host_support as host;
 
 use futures_util::FutureExt;
 use maka_event_log::root::ROOT_MARKER;

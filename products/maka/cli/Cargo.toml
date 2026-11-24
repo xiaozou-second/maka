@@ -116,6 +116,7 @@ semver = "1.0.28"
 tar = { version = "0.4.46", default-features = false }
 maka-host-runtime.workspace = true
 maka-remote-pairing.workspace = true
+maka-remote-transport = { workspace = true, features = ["host", "relay-server"] }
 maka-event-log.workspace = true
 maka-js-runtime.workspace = true
 maka-process.workspace = true
