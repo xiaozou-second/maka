@@ -48,6 +48,9 @@ enum Command {
     /// Author, inspect and serve plugin applications.
     #[command(subcommand)]
     Application(crate::application::Command),
+    /// Issue native peer invitations and manage device access.
+    #[command(subcommand)]
+    Access(crate::access::PeerAccess),
     /// Manage the native runtime host.
     #[command(subcommand)]
     Host(HostCommand),
@@ -177,7 +180,8 @@ impl Cli {
         if self.command.is_some() && self.terminal.is_some() {
             return Err("terminal options cannot be combined with a CLI command".into());
         }
-        let finite = matches!(&self.command, Some(Command::Host(command)) if !matches!(command,
+        let finite = matches!(&self.command, Some(Command::Access(_)))
+            || matches!(&self.command, Some(Command::Host(command)) if !matches!(command,
             HostCommand::Candidate(_) | HostCommand::Serve { .. } | HostCommand::ServiceRun(_)
             | HostCommand::Connect(_) | HostCommand::Ensure(_))
             && !matches!(command, HostCommand::Logs(logs) if logs.follow));
@@ -237,6 +241,7 @@ impl Cli {
             }
             Command::Run(args) => command_exit(args.run()),
             Command::Application(args) => command_exit(args.run()),
+            Command::Access(args) => command_exit(args.run()),
             Command::Sandbox(args) => Box::pin(args.run(self.timeout_ms)),
             Command::Host(HostCommand::Fetch(args)) => command_exit(args.run()),
             Command::Host(HostCommand::Access(args)) => command_exit(args.run()),

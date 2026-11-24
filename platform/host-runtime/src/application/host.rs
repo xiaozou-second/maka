@@ -24,7 +24,7 @@ pub mod discovery;
 mod lifecycle;
 pub mod startup;
 pub mod websocket;
-pub use access::Pairing;
+pub use access::{Pairing, PeerPairingInvite, PeerPairingOptions, PeerPairingReceipt};
 pub mod protocol;
 pub use client::{CallChannelOpener, Channel, Client, LocalCall, OpenChannel};
 pub use discovery::Registration;
@@ -36,7 +36,7 @@ use super::transport::{
 use super::{Application, NativeRegistry, Result};
 use crate::ipc::{LocalListener, LocalStream};
 use access::{Authority, Principal};
-pub use maka_config::access::PeerId;
+pub use maka_config::access::{HostPeerAccess, PeerId};
 use maka_event_log::root_store::RootStore;
 use maka_plugin_core::deployment::DeploymentRef;
 use protocol::{Connected, Opening, Request, Response, SessionControl};
@@ -83,6 +83,7 @@ pub struct Host {
     application: Application,
     store: Arc<RootStore>,
     access: Arc<maka_config::ConfigurationStore>,
+    identity: maka_remote_pairing::DeviceIdentity,
     access_grant: Mutex<String>,
     access_gate: tokio::sync::Mutex<()>,
     revoked_peers: broadcast::Sender<PeerId>,
@@ -112,6 +113,15 @@ enum SessionMode {
         selections: BTreeMap<String, HostEndpoint>,
     },
 }
+fn publication_grant(source: &DeploymentRef, configuration: &Configuration) -> Result<String> {
+    let publication =
+        serde_json::to_vec(&(source, configuration)).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "application.owner:{}",
+        hex::encode(sha2::Sha256::digest(publication))
+    ))
+}
+
 impl Host {
     pub async fn open(
         store: Arc<RootStore>,
@@ -170,6 +180,26 @@ impl Host {
             ..
         } = &configuration;
         let root = store.owned_root().map_err(|error| error.to_string())?;
+        let source = loaded.source().reference.clone();
+        let access_grant = publication_grant(&source, &configuration)?;
+        let identity_path = root
+            .canonical_path()
+            .join(maka_remote_pairing::HOST_IDENTITY_FILE);
+        let identity = tokio::task::spawn_blocking(move || {
+            maka_remote_pairing::DeviceIdentity::load_or_create(&identity_path)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+        let access = Arc::new(
+            maka_config::ConfigurationStore::for_root(root.clone())
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+        access
+            .prune_host_peer_pairing_invites(access_grant.clone())
+            .await
+            .map_err(|error| error.to_string())?;
         let policy = Arc::new(PeerPolicy::with_native_grants(grants.clone())?);
         let application = Application::start_loaded(
             store.clone(),
@@ -183,21 +213,6 @@ impl Host {
             application.shutdown().await?;
             return Err(error);
         }
-        let access = match maka_config::ConfigurationStore::for_root(root.clone()).await {
-            Ok(access) => Arc::new(access),
-            Err(error) => {
-                application.shutdown().await?;
-                return Err(error.to_string());
-            }
-        };
-        let access_grant = format!(
-            "application.owner:{}",
-            hex::encode(sha2::Sha256::digest(
-                serde_json::to_vec(&(application.source(), &configuration))
-                    .map_err(|error| error.to_string())?
-            ))
-        );
-        let source = application.source().expect("persisted Host").clone();
         // Only this running revision and newer ones can still have callers.
         if let Err(error) = store.release_superseded_application_sources(&source).await {
             tracing::error!(%error, "Superseded application sources remain installed");
@@ -209,6 +224,7 @@ impl Host {
             application,
             store,
             access,
+            identity,
             access_grant: Mutex::new(access_grant),
             access_gate: tokio::sync::Mutex::new(()),
             // Keep room for a burst of peer revocations without disconnecting
@@ -286,13 +302,8 @@ impl Host {
         if persisted != previous && persisted != desired {
             return Err("Host configuration conflicts with persisted authority".into());
         }
-        let access_grant = format!(
-            "application.owner:{}",
-            hex::encode(sha2::Sha256::digest(
-                serde_json::to_vec(&(Some(&self.source), &configuration))
-                    .map_err(|error| error.to_string())?
-            ))
-        );
+        let access_grant = publication_grant(&self.source, &configuration)?;
+        let grant_changed = *self.access_grant.lock().unwrap() != access_grant;
         if !self
             .store
             .compare_and_set_application_launch_configuration(source, record.configuration, desired)
@@ -303,8 +314,17 @@ impl Host {
         }
         // Fence obsolete native bindings before publishing the new authority.
         // Jobs that already started still belong to their original transport.
-        let grant_changed = *self.access_grant.lock().unwrap() != access_grant;
         if grant_changed {
+            if let Err(error) = self
+                .access
+                .prune_host_peer_pairing_invites(access_grant.clone())
+                .await
+            {
+                // The durable publication moved. Do not admit under the old
+                // grant; cold startup will reconcile the invitations.
+                self.stop.cancel();
+                return Err(error.to_string());
+            }
             self.revoke_native_sessions();
         }
         let Configuration::PublicHost { native, .. } = &configuration;
@@ -313,6 +333,11 @@ impl Host {
         *self.access_grant.lock().unwrap() = access_grant;
         Ok(())
     }
+    /// The native transport must use the same key that signs pairing tickets.
+    pub fn device_identity(&self) -> &maka_remote_pairing::DeviceIdentity {
+        &self.identity
+    }
+
     pub fn root_id(&self) -> &str {
         self.root.root_id()
     }
@@ -602,6 +627,31 @@ impl Host {
                     &Response::Revoked(self.revoke_access(credential).await),
                 )
                 .await
+            }
+            Request::PreparePeerPairing(options) => {
+                authority.local()?;
+                let result = self.prepare_peer_pairing(options).await;
+                wire::write(&mut output, &Response::PeerPairingInvite(result)).await
+            }
+            Request::ListPeerAccess => {
+                authority.local()?;
+                let result = self.list_peer_access().await;
+                wire::write(&mut output, &Response::PeerAccess(result)).await
+            }
+            Request::RevokePeerAccess { peer_id } => {
+                authority.local()?;
+                let peer_id = PeerId::new(peer_id).map_err(|error| error.to_string())?;
+                let result = self.revoke_peer_access(peer_id).await;
+                wire::write(&mut output, &Response::Revoked(result)).await
+            }
+            Request::RedeemPeerPairing {
+                invite_secret,
+                device_label,
+            } => {
+                let result = self
+                    .redeem_peer_pairing(&authority, invite_secret, device_label)
+                    .await;
+                wire::write(&mut output, &Response::PeerPairingReceipt(result)).await
             }
             Request::FinalizeAccess => {
                 wire::write(

@@ -8533,6 +8533,7 @@ dependencies = [
  "maka-process",
  "maka-product-native",
  "maka-providers",
+ "maka-remote-pairing",
  "maka-sandbox",
  "maka-schema",
  "maka-settings-native",
@@ -8685,6 +8686,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
@@ -8953,6 +8955,7 @@ dependencies = [
  "maka-plugin-core",
  "maka-presentation",
  "maka-process",
+ "maka-remote-pairing",
  "maka-sandbox",
  "reqwest",
  "rusqlite",
@@ -9380,6 +9383,24 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+]
+
+[[package]]
+name = "maka-remote-pairing"
+version = "0.3.0"
+dependencies = [
+ "base64 0.23.1",
+ "ed25519-dalek 3.0.0",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.13.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
