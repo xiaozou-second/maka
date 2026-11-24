@@ -729,7 +729,7 @@
     "cargo:nonmax@0.5.5 registry+https://github.com/rust-lang/crates.io-index": "96cadc8ec0d3c696662e3c2a1517eabb9bd5df89709641960bb44cfdaf1da0a5",
     "cargo:normpath@1.5.2 registry+https://github.com/rust-lang/crates.io-index": "acb5de38e99086d3276bed3185ae9c77a77fbfee275f73691c6acffff082bf8e",
     "cargo:notify-types@2.1.0 registry+https://github.com/rust-lang/crates.io-index": "20250f0f40c0ead47cfbe86741c39d97177cc07e34caaa1af8cabe7f6de98aee",
-    "cargo:notify@8.2.1 registry+https://github.com/rust-lang/crates.io-index": "f61b2470546ca6ebb76c0f48c3eda5e7cab429bd32c8ae4dd515840c6e25a1a9",
+    "cargo:notify@8.2.2 registry+https://github.com/rust-lang/crates.io-index": "9126fb5fc7427f35c6f28a8582cc6e08b801793db6acddfb6c5421baa915e63a",
     "cargo:nsh-base@0.6.0 https://github.com/longbridge/nsh#d01cd3cce6645391c65a379d6230c2d2e651d55f (adapted; third-party/nsh/crates/nsh-base)": "2d63ad47dacf933bb90c314a9d3e738d2bc4bcbedf2ab0c18d795c501f2cc2e2",
     "cargo:nsh-bundler@0.6.0 https://github.com/longbridge/nsh#d01cd3cce6645391c65a379d6230c2d2e651d55f (adapted; third-party/nsh/crates/nsh-bundler)": "810532b532545c845545e133cdc7b4bea8661921070ea1cd921b81519d510bc9",
     "cargo:nsh-core@0.6.0 https://github.com/longbridge/nsh#d01cd3cce6645391c65a379d6230c2d2e651d55f (adapted; third-party/nsh/crates/nsh-core)": "be35644b35794bde459ff9456296c3fff313b3fc88e63de95710b763f618edd4",
@@ -1500,5 +1500,5 @@
     "npm:preact@11.0.0-beta.0 https://registry.npmjs.org/preact/-/preact-11.0.0-beta.0.tgz sha512-IcODoASASYwJ9kxz7+MJeiJhvLriwSb4y4mHIyxdgaRZp6kPUud7xytrk/6GZw8U3y6EFJaRb5wi9SrEK+8+lg==": "da4f7ecf86f57891c776c0bef60deac13ff94c989832f12b1b5df88826fdf5eb",
     "npm:zod@4.6.7 https://registry.npmjs.org/zod/-/zod-4.6.7.tgz sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==": "8d405b2be44c8f37150acc9a7b5f1cf6103ddc26b043e56d34625b1c45d3a2ff"
   },
-  "sha256": "d610d48d164bed9e4d1585364280613c282d4d0e7e26b025327908ba01ffaf3d"
+  "sha256": "b16ce3c881d0616dcf63e99ce1e3a0723479bafc67230d4dfcf4424129a1afe3"
 }
