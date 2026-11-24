@@ -18,6 +18,7 @@
  */
 
 import { Text } from 'nsh';
+import { shouldStripCitationMarkers, stripCitationMarkers } from './answerCitations';
 import type { Row } from './history';
 
 /** Canonical history and a live opening address the same original text. */
@@ -29,7 +30,15 @@ export function SourceText(props: { row(): Row; sourceId: string }) {
     >
       {(fragment) => (
         <Text textSource={{ id: props.sourceId, offset: fragment().offset }}>
-          {fragment().text}
+          {(() => {
+            const row = props.row();
+            const text = fragment().text;
+            return shouldStripCitationMarkers(row)
+              ? stripCitationMarkers(text, {
+                  streaming: row.closedAt === null || Boolean(row.preview),
+                })
+              : text;
+          })()}
         </Text>
       )}
     </Each>

@@ -256,7 +256,14 @@ impl Owner {
                                 continue;
                             }
                         }
-                        reply = Some(visible(text.to_string()));
+                        let cleaned = {
+                            let raw = visible(text.to_string());
+                            maka_presentation::strip_citation_markers(&raw).into_owned()
+                        };
+                        if cleaned.trim().is_empty() {
+                            continue;
+                        }
+                        reply = Some(cleaned);
                         break 'scan;
                     }
                     Fact::ExternalTaskObserved {

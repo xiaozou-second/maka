@@ -26,6 +26,10 @@ mod message;
 pub mod navigation;
 pub mod shell;
 mod step;
+pub use maka_provider_protocol::responses::markers::{
+    has_citation_markers, strip_citation_markers, strip_citation_markers_streaming,
+};
+pub use step::assistant_text;
 pub use step::reasoning::display_text as reasoning_text;
 mod tools;
 pub use tools::project_tool_boundary;

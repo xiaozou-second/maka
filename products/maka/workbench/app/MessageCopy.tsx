@@ -24,6 +24,7 @@ import { toast } from './toastStore';
 import { cleanup, computed, inputAction, signal } from 'nsh';
 import { Clipboard } from 'nsh';
 import { useHost } from './host';
+import { stripCitationMarkers } from './answerCitations';
 import { messageBytes, sameHistoryRow, type Row } from './history';
 import type { MessageMenu } from './messageMenu';
 import { IconButton } from './ui';
@@ -135,7 +136,9 @@ export function MessageCopy(props: {
     try {
       const content = await readOriginal(host, original, () => owns(original));
       if (content === null) return;
-      await Clipboard.writeText(content);
+      await Clipboard.writeText(
+        original.role === 'assistant' ? stripCitationMarkers(content) : content,
+      );
       if (owns(original)) {
         copied.set(true);
         if (resetTimer !== null) clearTimeout(resetTimer);

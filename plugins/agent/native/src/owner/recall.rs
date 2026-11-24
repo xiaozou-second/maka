@@ -263,12 +263,17 @@ impl Recall {
                     continue;
                 }
             };
+            let excerpt = if hit.anchor.role == indexed::Role::Assistant {
+                maka_presentation::strip_citation_markers(&hit.anchor.body).into_owned()
+            } else {
+                hit.anchor.body
+            };
             passages.push(RecallPassage {
                 session,
                 anchor_message_id: hit.anchor.message_id,
                 anchor_position: address,
                 through: hit.cut.through_sequence,
-                excerpt: hit.anchor.body,
+                excerpt,
                 highlights: vec![],
                 matched_terms: hit.matched_terms,
             });

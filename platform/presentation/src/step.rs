@@ -20,11 +20,26 @@
 use crate::{Content, Message, ModelIdentity, ProjectionError, Thinking};
 use maka_agent_facts::durable::{ModelAttemptId, StepId};
 use maka_agent_facts::event::RuntimeEvent;
+use maka_agent_facts::model::body::TextBody;
 use maka_agent_facts::model::recorded::{CompletionPart, ModelPartRecord};
 use maka_agent_facts::model::{ModelPart, TextKind};
+use maka_provider_protocol::responses::markers::{has_citation_markers, strip_citation_markers};
 use std::collections::BTreeMap;
 
 pub(crate) mod reasoning;
+
+/// Strip provider Private Use Area citation/entity markers in disposable prose
+/// views while keeping raw wire text intact for exact Responses replay.
+pub fn assistant_text(text: &TextBody) -> TextBody {
+    if !text.chunks().any(has_citation_markers) {
+        return text.clone();
+    }
+    let raw = text.to_string();
+    match strip_citation_markers(&raw) {
+        std::borrow::Cow::Borrowed(_) => text.clone(),
+        std::borrow::Cow::Owned(cleaned) => TextBody::from(cleaned),
+    }
+}
 
 pub(super) struct Step {
     id: ModelIdentity,
@@ -120,7 +135,7 @@ impl Step {
             failed && !(*text_kind == TextKind::Thinking && reasoning::finalized(options.as_ref()));
         let body = match text_kind {
             TextKind::Thinking => reasoning::display_text(text, options.as_ref()),
-            TextKind::Text => text.clone(),
+            TextKind::Text => assistant_text(text),
         }
         .chunks()
         .collect();
@@ -149,5 +164,20 @@ impl Step {
                 provider_options: options,
             },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_text_strips_provider_citation_markers_without_touching_plain_text() {
+        let plain = TextBody::from("Plain markdown  \nwith hard break.");
+        assert_eq!(assistant_text(&plain), plain);
+
+        let raw =
+            TextBody::from("保留 KVM 和现有磁盘。 \u{E200}cite\u{E202}turn137145search0\u{E201}");
+        assert_eq!(assistant_text(&raw).to_string(), "保留 KVM 和现有磁盘。");
     }
 }

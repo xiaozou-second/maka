@@ -19,7 +19,13 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { answerSource, citationOffsets } from '../app/answerCitations.ts';
+import {
+  answerSource,
+  citationOffsets,
+  prepareCitationText,
+  shouldStripCitationMarkers,
+  stripCitationMarkers,
+} from '../app/answerCitations.ts';
 import { mergeHistoryPage } from '../app/history.ts';
 
 const first = answerSource(
@@ -117,4 +123,85 @@ test('citations survive loading the body and tail of a history source in either 
       ['abcd', head.citation, head.citationAnchor],
     );
   }
+});
+
+test('OpenAI PUA citation markers are stripped while remapping range and block-end anchors', () => {
+  const prefix = '保留 KVM 和现有磁盘。';
+  const marker = '\uE200cite\uE202turn137145search0\uE201';
+  const raw = `${prefix} ${marker}`;
+  const rawChars = [...raw].length;
+  const markerStart = [...`${prefix} `].length;
+  const rawBytes = Buffer.byteLength(raw, 'utf8');
+  const cleanBytes = Buffer.byteLength(prefix, 'utf8');
+
+  const prepared = prepareCitationText(raw, [range(first, markerStart, rawChars)], rawBytes);
+  assert.equal(prepared.text, prefix);
+  assert.deepEqual(prepared.markers, [{ byte: cleanBytes, source: first }]);
+
+  // Block-end anchors still validate against raw totalBytes while pointing at cleaned bytes.
+  const withBlockEnd = prepareCitationText(raw, [blockEnd(second)], rawBytes);
+  assert.equal(withBlockEnd.text, prefix);
+  assert.deepEqual(withBlockEnd.markers, [{ byte: cleanBytes, source: second }]);
+  assert.deepEqual(prepareCitationText(raw, [blockEnd(second)], rawBytes + 1).markers, []);
+});
+
+test('inline PUA markers, clusters, emoji, entities, and attributed spans preserve spacing and anchor positions', () => {
+  const raw =
+    '😀 Fixed in \uE200entity\uE202["software","QEMU","emulator"]\uE201 \uE200cite\uE202turn0search0\uE201 \uE200cite\uE202turn0search1\uE201 and \uE203STIMER0\uE204 \uE200cite\uE202turn0view0\uE201.';
+  const scalarEndAfter = (needle) =>
+    [...raw.slice(0, raw.indexOf('\uE201', raw.indexOf(needle)) + 1)].length;
+  const cite1End = scalarEndAfter('turn0search0');
+  const cite2End = scalarEndAfter('turn0search1');
+  const cite3End = scalarEndAfter('turn0view0');
+
+  const prepared = prepareCitationText(
+    raw,
+    [
+      range(first, cite1End - 20, cite1End),
+      range(second, cite2End - 20, cite2End),
+      range(first, cite3End - 18, cite3End),
+    ],
+    undefined,
+  );
+
+  assert.equal(prepared.text, '😀 Fixed in QEMU and STIMER0.');
+  assert.deepEqual(prepared.markers, [
+    { byte: Buffer.byteLength('😀 Fixed in QEMU', 'utf8'), source: first },
+    { byte: Buffer.byteLength('😀 Fixed in QEMU', 'utf8'), source: second },
+    { byte: Buffer.byteLength('😀 Fixed in QEMU and STIMER0', 'utf8'), source: first },
+  ]);
+
+  assert.equal(
+    stripCitationMarkers('Fixed in QEMU \uE200cite\uE202turn0search0\uE201today.'),
+    'Fixed in QEMU today.',
+  );
+  assert.equal(
+    stripCitationMarkers('  - item \uE200cite\uE202turn0search0\uE201  \n  - next'),
+    '  - item  \n  - next',
+  );
+});
+
+test('streaming hides incomplete PUA marker tails without flickering and only strips agent/assistant prose', () => {
+  assert.equal(stripCitationMarkers('保留磁盘。 \uE200', { streaming: true }), '保留磁盘。');
+  assert.equal(stripCitationMarkers('保留磁盘。 \uE200ci', { streaming: true }), '保留磁盘。');
+  assert.equal(
+    stripCitationMarkers('保留磁盘。 \uE200cite\uE202turn137145', { streaming: true }),
+    '保留磁盘。',
+  );
+  assert.equal(
+    stripCitationMarkers('保留磁盘。 \uE200cite\uE202turn137145', { streaming: false }),
+    '保留磁盘。',
+  );
+
+  assert.equal(shouldStripCitationMarkers({ role: 'assistant', field: 'body' }), true);
+  assert.equal(shouldStripCitationMarkers({ role: 'assistant', field: 'thinking' }), false);
+  assert.equal(shouldStripCitationMarkers({ role: 'user', field: 'body' }), false);
+  assert.equal(
+    shouldStripCitationMarkers({ role: 'user', field: 'body', origin: { kind: 'session' } }),
+    false,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({ role: 'user', field: 'body', origin: { kind: 'worker' } }),
+    true,
+  );
 });

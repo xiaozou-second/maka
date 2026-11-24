@@ -33,6 +33,12 @@ pub(super) fn tool_passages(
     for passage in &mut results.passages {
         for message in &mut passage.messages {
             check(stop)?;
+            if message.role == maka_agent_ports::session::history::Role::Assistant
+                && let std::borrow::Cow::Owned(cleaned) =
+                    maka_presentation::strip_citation_markers(&message.text)
+            {
+                message.text = cleaned;
+            }
             let Some((end, _)) = message.text.char_indices().nth(TOOL_CHARACTERS) else {
                 continue;
             };
@@ -282,5 +288,60 @@ mod tests {
             row.field,
             maka_agent_ports::session::history::HistoryField::Body
         );
+    }
+
+    #[test]
+    fn recall_strips_provider_citation_markers_from_assistant_passages_only() {
+        use maka_agent_facts::{durable::FactId, history::HistoryRowAddress};
+        use maka_agent_ports::session::history::Role;
+        use maka_assistant::recall::search::{Passage, PassageMessage, ResultSet};
+
+        let marker = "保留磁盘。 \u{E200}cite\u{E202}turn137145search0\u{E201}";
+        let result = tool_passages(
+            ResultSet {
+                facts: vec![],
+                next_facts_after: None,
+                passages: vec![Passage {
+                    session_id: "session".into(),
+                    session_title: "Citation fixture".into(),
+                    anchor_message_id: "assistant".into(),
+                    anchor_position: HistoryRowAddress::Live {
+                        sequence: 10,
+                        fact: FactId::new(),
+                        item_index: 0,
+                    },
+                    through: 10,
+                    turn_id: "turn".into(),
+                    messages: vec![
+                        PassageMessage {
+                            message_id: "user".into(),
+                            role: Role::User,
+                            text: marker.into(),
+                            timestamp: 0,
+                            is_anchor: false,
+                            attachments: vec![],
+                        },
+                        PassageMessage {
+                            message_id: "assistant".into(),
+                            role: Role::Assistant,
+                            text: marker.into(),
+                            timestamp: 1,
+                            is_anchor: true,
+                            attachments: vec![],
+                        },
+                    ],
+                    matched_terms: vec!["保留磁盘".into()],
+                    score: 1.,
+                    has_more_before: false,
+                    has_more_after: false,
+                }],
+                searched_every_session: true,
+                gaps: vec![],
+            },
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(result.passages[0].messages[0].text, marker);
+        assert_eq!(result.passages[0].messages[1].text, "保留磁盘。");
     }
 }

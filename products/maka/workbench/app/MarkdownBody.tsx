@@ -20,7 +20,13 @@
 import { cleanup, computed, platform, signal, Text, View } from 'nsh';
 import { TextView } from 'nsh/base';
 import { SourceChip } from './AnswerSources';
-import { citationOffsets, type InlineCitation, type AnswerSource } from './answerCitations';
+import {
+  citationOffsets,
+  prepareCitationText,
+  shouldStripCitationMarkers,
+  type InlineCitation,
+  type AnswerSource,
+} from './answerCitations';
 import { hasTextPrefix, messageBytes, type Row } from './history';
 import { CodeBlockAction, codeBlockActions, codeBlockStyles } from './codeBlockLook';
 import { MermaidView } from './MermaidView';
@@ -85,26 +91,32 @@ export function MarkdownBody(props: {
   };
 
   const rawMarkdown = () => (props.text ? props.text() : props.row().text);
+  const prepared = computed(() => {
+    const row = props.row();
+    const raw = rawMarkdown();
+    const citations =
+      props.text === undefined && !hasTextPrefix(row) ? undefined : props.citations?.();
+    return shouldStripCitationMarkers(row)
+      ? prepareCitationText(raw, citations, row.totalBytes, { streaming: isStreaming() })
+      : {
+          text: raw,
+          markers: citations?.length ? citationOffsets(raw, citations, row.totalBytes) : [],
+        };
+  });
   const segments = computed(() => {
-    const text = rawMarkdown();
+    const text = prepared().text;
     return props.interactiveBlocks === false
       ? [{ kind: 'markdown' as const, key: 'markdown', text, start: 0 }]
       : splitSpecMarkdown(text);
   });
-  const markers = computed(() => {
-    const citations = props.citations?.();
-    if (!citations?.length) return [];
-    const row = props.row();
-    if (props.text === undefined && !hasTextPrefix(row)) return [];
-    return citationOffsets(rawMarkdown(), citations, row.totalBytes);
-  });
+  const markers = () => prepared().markers;
   // Each TextView parses its own segment. Spec contents belong to SpecView,
   // so citations within that fence follow the generated view.
   const segmentMarkers = computed(() => {
     const result = new Map<string, { name: string; afterByte: number; source: AnswerSource }[]>();
     const positioned = markers();
     if (!positioned.length) return result;
-    const text = rawMarkdown();
+    const text = prepared().text;
     let end = 0;
     let bytes = 0;
     let next = 0;

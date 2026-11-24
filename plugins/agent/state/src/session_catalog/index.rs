@@ -88,15 +88,15 @@ pub(crate) fn fact_message(
                     ..
                 },
             ..
-        } if !text.is_empty() => Some((
-            fact.id.to_string(),
-            Some(
-                text.chunks()
-                    .flat_map(str::chars)
-                    .take(160)
-                    .collect::<String>(),
-            ),
-        )),
+        } if !text.is_empty() => {
+            let prefix: String = text.chunks().flat_map(str::chars).take(512).collect();
+            let cleaned =
+                maka_provider_protocol::responses::markers::strip_citation_markers_streaming(
+                    &prefix,
+                );
+            let preview: String = cleaned.chars().take(160).collect();
+            (!preview.is_empty()).then(|| (fact.id.to_string(), Some(preview)))
+        }
         Fact::ExternalTaskObserved {
             task,
             output: maka_agent_facts::executor::Output::OutputDelta { message_id, text },

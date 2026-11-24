@@ -176,6 +176,11 @@ fn chunk_to_entry(
             } else {
                 "assistant"
             };
+            let text = if !sliced && chunk.field == wire::HistoryField::Body {
+                maka_presentation::strip_citation_markers(&chunk.text).into_owned()
+            } else {
+                chunk.text
+            };
             Some(AgentTranscriptEntry {
                 role: role.into(),
                 turn_id: chunk.turn_id,
@@ -185,7 +190,7 @@ fn chunk_to_entry(
                 result_path: None,
                 offset,
                 total_bytes,
-                text: chunk.text,
+                text,
             })
         }
         wire::Role::Failure => {
@@ -612,11 +617,15 @@ impl Owner {
                     .await
                 && !work.answer.text.is_empty()
             {
-                let mut preview: String = work.answer.text.chars().take(800).collect();
-                if work.answer.next.is_some() || work.answer.text.chars().count() > 800 {
-                    preview.push('…');
+                let cleaned =
+                    maka_presentation::strip_citation_markers_streaming(&work.answer.text);
+                if !cleaned.is_empty() {
+                    let mut preview: String = cleaned.chars().take(800).collect();
+                    if work.answer.next.is_some() || cleaned.chars().count() > 800 {
+                        preview.push('…');
+                    }
+                    live_output_preview = Some(preview);
                 }
-                live_output_preview = Some(preview);
             }
             run_overview = self
                 .session_run_overview(&session_id, observed.run.as_ref(), scope)

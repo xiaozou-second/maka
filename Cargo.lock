@@ -9235,6 +9235,7 @@ version = "0.3.0"
 dependencies = [
  "maka-agent-facts",
  "maka-plugin-core",
+ "maka-provider-protocol",
  "schemars 1.2.3",
  "serde",
  "serde_json",

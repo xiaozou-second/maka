@@ -28,6 +28,7 @@ import { compactCopyInset, CompactReplyFooter, LocalMessageCopy } from './Compac
 import type { replyMetrics } from './replyDetails';
 import { Icon } from './Icon';
 import { ShimmerText, ThinkingMark } from './Loading';
+import { stripCitationMarkers } from './answerCitations';
 import { splitSpecMarkdown } from './spec/session.ts';
 import { C, bodyTextStyle, captionTextStyle } from './ui';
 
@@ -55,7 +56,8 @@ export function BotReply(props: {
     >
       <Each of={props.messages()} key={(message) => String(message.sequence)}>
         {(message) => {
-          const segments = computed(() => splitSpecMarkdown(message().text));
+          const cleanText = () => stripCitationMarkers(message().text);
+          const segments = computed(() => splitSpecMarkdown(cleanText()));
           return (
             <View
               class={props.metrics ? 'group' : undefined}
@@ -143,9 +145,7 @@ export function BotReply(props: {
                             }
                           >
                             <MenuItem
-                              onSelect={() =>
-                                void Clipboard.writeText(menuText() || message().text)
-                              }
+                              onSelect={() => void Clipboard.writeText(menuText() || cleanText())}
                             >
                               <Text>{tr('Copy message')}</Text>
                             </MenuItem>
@@ -195,7 +195,7 @@ export function BotReply(props: {
                   <CompactReplyFooter
                     at={message().at}
                     metrics={() => props.metrics!(message().at)}
-                    copy={<LocalMessageCopy text={() => message().text} />}
+                    copy={<LocalMessageCopy text={cleanText} />}
                   />
                 </View>
               </If>
