@@ -47,6 +47,8 @@ mod host;
 use futures_util::FutureExt;
 use host::Host;
 use maka_capabilities::call::{Attachments, ReadResource, ResourceEncoding};
+use maka_config::{ConfigurationStore, access::PeerId};
+use maka_event_log::root::{RootNamespaces, RootOwner};
 use maka_host_runtime::application::{host::Client, transport::Reply};
 use maka_mock_ai::{
     ControlPlaneConfig, FinishReason, MockAiBuilder, MockAiServer, ModelEntry, NormalizedRequest,
@@ -80,6 +82,7 @@ const BIN_ENV: &str = "MAKA_COMPAT_BIN";
 const ATTACHMENT_BYTES: &[u8] = "compat capsule attachment — 兼容性附件\n".as_bytes();
 const COMPACTION_PROMPT: &str = "Preserve upgrade compatibility markers across restarts.";
 const PRESET_NAME: &str = "Compat Reviewer";
+const COMPAT_PEER_GRANT: &str = "compat-host-publication";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +107,8 @@ struct CapsuleManifest {
     #[serde(default)]
     operation_ref: Option<Value>,
     migrations: BTreeMap<String, Vec<i64>>,
+    #[serde(default)]
+    host_peer_id: Option<String>,
 }
 
 struct FixtureSecret;
@@ -698,6 +703,17 @@ fn verify_queued_after_upgrade(item: &QueuedBeforeUpgrade) {
     );
 }
 
+// Only open settings directly with the real Root lease after the child exits.
+async fn open_compat_settings(root: &Path) -> ConfigurationStore {
+    let root = root.to_owned();
+    let owner = tokio::task::spawn_blocking(move || {
+        RootOwner::open_existing(&root, &RootNamespaces::for_current_account().unwrap()).unwrap()
+    })
+    .await
+    .unwrap();
+    ConfigurationStore::for_root(Arc::new(owner)).await.unwrap()
+}
+
 async fn produce_capsule(bin: &Path, capsule_dir: &Path) -> CapsuleManifest {
     fs::create_dir_all(capsule_dir).unwrap();
     let canonical_base = fs::canonicalize(capsule_dir).unwrap();
@@ -1033,6 +1049,17 @@ async fn produce_capsule(bin: &Path, capsule_dir: &Path) -> CapsuleManifest {
 
         host.quit(&mut client).await.expect("Host quit");
 
+        let host_peer_id = format!("compat-peer-{nonce}");
+        let settings = open_compat_settings(&dirs.root).await;
+        settings
+            .grant_host_peer_access(
+                PeerId::new(host_peer_id.clone()).unwrap(),
+                COMPAT_PEER_GRANT.into(),
+            )
+            .await
+            .unwrap();
+        settings.close().await.unwrap();
+
         let migrations = verify_sqlite_integrity_and_migrations(&dirs.root);
         CapsuleManifest {
             format_version: 1,
@@ -1054,6 +1081,7 @@ async fn produce_capsule(bin: &Path, capsule_dir: &Path) -> CapsuleManifest {
             session_data_key: "compat_capsule_state".into(),
             operation_ref,
             migrations,
+            host_peer_id: Some(host_peer_id),
         }
     })
     .catch_unwind()
@@ -1406,6 +1434,38 @@ async fn verify_capsule(bin: &Path, capsule_dir: &Path) {
         );
 
         host.quit(&mut client).await.expect("Host quit");
+
+        // Old capsules have no transport grants; new ones must keep the exact
+        // binding. Both must support live mutations after cold startup.
+        let settings = open_compat_settings(&dirs.root).await;
+        let peer = PeerId::new(
+            manifest
+                .host_peer_id
+                .clone()
+                .unwrap_or_else(|| format!("compat-peer-{post_nonce}")),
+        )
+        .unwrap();
+        let granted = settings
+            .has_host_peer_access(peer.clone(), COMPAT_PEER_GRANT.into())
+            .await
+            .unwrap();
+        assert_eq!(granted, manifest.host_peer_id.is_some());
+        if !granted {
+            settings
+                .grant_host_peer_access(peer.clone(), COMPAT_PEER_GRANT.into())
+                .await
+                .unwrap();
+        }
+        assert!(settings.revoke_host_peer_access(peer.clone()).await.unwrap());
+        settings.close().await.unwrap();
+        let settings = open_compat_settings(&dirs.root).await;
+        assert!(
+            !settings
+                .has_host_peer_access(peer, COMPAT_PEER_GRANT.into())
+                .await
+                .unwrap()
+        );
+        settings.close().await.unwrap();
 
         // Online checkpoint re-export & open sweep on the upgraded live Root
         // (proves checkpoint heads and objects survived upgrade, not only the pre-upgrade tarball).
