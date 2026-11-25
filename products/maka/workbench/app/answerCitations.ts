@@ -88,11 +88,79 @@ export function urlSource(target: string, label?: string | null): AnswerSource {
 export function shouldStripCitationMarkers(row: Pick<Row, 'role' | 'field' | 'origin'>): boolean {
   if (row.field !== 'body') return false;
   if (row.role === 'assistant') return true;
-  return row.role === 'user' && Boolean(row.origin && row.origin.kind !== 'session');
+  if (row.role !== 'user' || !row.origin) return false;
+  switch (row.origin.kind) {
+    case 'session_completion':
+    case 'bot_worker':
+    case 'discovery_report':
+    case 'session':
+      return true;
+    case 'room':
+      return row.origin.author.kind !== 'human';
+    default:
+      return false;
+  }
+}
+
+/** Whether a row's loaded text may end mid-marker (live stream, preview, or truncated page). */
+export function isIncompleteCitationText(
+  row: Pick<Row, 'closedAt' | 'preview' | 'totalBytes'>,
+  loadedEndBytes?: number,
+): boolean {
+  return (
+    row.closedAt === null ||
+    Boolean(row.preview) ||
+    (row.totalBytes !== undefined &&
+      loadedEndBytes !== undefined &&
+      loadedEndBytes < row.totalBytes)
+  );
+}
+
+export interface TextFragment {
+  offset: number;
+  text: string;
 }
 
 function utf8Bytes(cp: number): number {
   return cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+}
+
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; ) {
+    const cp = text.codePointAt(i)!;
+    bytes += utf8Bytes(cp);
+    i += cp > 0xffff ? 2 : 1;
+  }
+  return bytes;
+}
+
+/**
+ * Merge contiguous raw-byte fragments before stripping PUA markers so markers split
+ * across history page boundaries are cleaned cleanly while keeping gaps separate.
+ */
+export function prepareSourceFragments(
+  row: Pick<Row, 'role' | 'field' | 'origin' | 'closedAt' | 'preview' | 'totalBytes'>,
+  fragments: readonly TextFragment[],
+): TextFragment[] {
+  if (!shouldStripCitationMarkers(row)) return [...fragments];
+  const merged: { offset: number; end: number; text: string }[] = [];
+  for (const fragment of fragments) {
+    const end = fragment.offset + utf8ByteLength(fragment.text);
+    const prev = merged[merged.length - 1];
+    if (prev && prev.end === fragment.offset) {
+      prev.text += fragment.text;
+      prev.end = end;
+    } else {
+      merged.push({ offset: fragment.offset, end, text: fragment.text });
+    }
+  }
+  return merged.map((run) => ({
+    offset: run.offset,
+    text: stripCitationMarkers(run.text, {
+      streaming: isIncompleteCitationText(row, run.end),
+    }),
+  }));
 }
 
 function isHorizontalSpace(ch: string): boolean {
@@ -101,6 +169,22 @@ function isHorizontalSpace(ch: string): boolean {
 
 function isSpanDelim(ch: string): boolean {
   return ch === SPAN_OPEN || ch === SPAN_CLOSE;
+}
+
+const CLOSING_DELIM = /^[*_~"'”’]$/;
+
+function isClosingDelimiter(text: string, at: number): boolean {
+  let pos = at;
+  let matched = false;
+  while (pos < text.length && CLOSING_DELIM.test(text[pos]!)) {
+    const delim = text[pos]!;
+    matched = true;
+    while (pos < text.length && text[pos] === delim) pos++;
+  }
+  if (!matched) return false;
+  if (pos >= text.length) return true;
+  const next = text[pos]!;
+  return /\s/u.test(next) || TRAILING_PUNCTUATION.test(next);
 }
 
 function extractEntityDisplay(payload: string): string | undefined {
@@ -142,14 +226,10 @@ function parseMarker(text: string, start: number, streaming: boolean): ParsedMar
   // Reached EOF without closing U+E201.
   const tail = text.slice(afterOpen);
   const sep = tail.indexOf(SEP);
-  if (streaming) {
-    if (tail.length === 0 || ASCII_TAG.test(tail)) return { kind: 'remove', end: text.length };
-    if (sep !== -1 && ASCII_TAG.test(tail.slice(0, sep))) {
-      return { kind: 'remove', end: text.length };
-    }
-    return undefined;
-  }
-  if (sep !== -1 && ASCII_TAG.test(tail.slice(0, sep))) {
+  if (
+    (streaming && (tail.length === 0 || ASCII_TAG.test(tail))) ||
+    (sep !== -1 && ASCII_TAG.test(tail.slice(0, sep)))
+  ) {
     return { kind: 'remove', end: text.length };
   }
   return undefined;
@@ -338,7 +418,8 @@ export function prepareCitationText(
           nextCh === '\n' ||
           nextCh === '\r' ||
           isHorizontalSpace(nextCh) ||
-          TRAILING_PUNCTUATION.test(nextCh);
+          TRAILING_PUNCTUATION.test(nextCh) ||
+          isClosingDelimiter(text, afterCluster);
         if (dropPreSpace) advanceSkipped(pos, spaceEnd);
         else advanceEmitted(pos, spaceEnd);
         advanceSkipped(spaceEnd, clusterEnd);

@@ -23,6 +23,7 @@ import type { AgentRoomMessage } from '../../../../packages/plugin-sdk/src/index
 import { HistoryAttachments } from './Attachments';
 import { Icon } from './Icon';
 import type { ImagePreview } from './ImageThumbnail';
+import { stripCitationMarkers } from './answerCitations';
 import { MarkdownBody } from './MarkdownBody';
 import { RoomDeliveryStrip } from './RoomPanels';
 import {
@@ -319,11 +320,12 @@ export function RoomMessageRow(props: {
         <If when={Boolean(props.message().content.text)}>
           <MenuItem
             accessibilityLabel={tr('Copy message')}
-            onSelect={() =>
-              void Clipboard.writeText(props.message().content.text).catch((reason) =>
-                props.onError?.(reason),
-              )
-            }
+            onSelect={() => {
+              const raw = props.message().content.text;
+              void Clipboard.writeText(isHuman() ? raw : stripCitationMarkers(raw)).catch(
+                (reason) => props.onError?.(reason),
+              );
+            }}
             style={{ ...menuRowStyle(), minWidth: 168 }}
             hoverStyle={menuRowHoverStyle()}
             focusStyle={menuRowHoverStyle()}

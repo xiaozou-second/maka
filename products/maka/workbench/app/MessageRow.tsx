@@ -35,7 +35,12 @@ import {
   type Row,
 } from './history';
 import type { MessageOrigin } from '../../../../packages/plugin-sdk/src/index.js';
-import type { InlineCitation } from './answerCitations';
+import {
+  isIncompleteCitationText,
+  shouldStripCitationMarkers,
+  stripCitationMarkers,
+  type InlineCitation,
+} from './answerCitations';
 import { MarkdownBody } from './MarkdownBody';
 import { SourceText } from './SourceText';
 import { compactCopyInset, CompactReplyFooter, LocalMessageCopy } from './CompactReplyFooter';
@@ -318,7 +323,12 @@ export function MessageRow({
             if (expanded()) return '';
             const value = row();
             if (value.fragments && value.fragments[0]?.offset !== 0) return '';
-            const start = /\S[\s\S]{0,239}/u.exec(value.text)?.[0];
+            const source = shouldStripCitationMarkers(value)
+              ? stripCitationMarkers(value.text, {
+                  streaming: isIncompleteCitationText(value, messageBytes(value.text)),
+                })
+              : value.text;
+            const start = /\S[\s\S]{0,239}/u.exec(source)?.[0];
             return start
               ? TextView.plainText(TextView.parse(start, { streaming: true }))
                   .replace(/\s+/g, ' ')
@@ -630,7 +640,21 @@ export function MessageRow({
                       >
                         <View class={revealed} style={{ marginLeft: compactCopyInset }}>
                           <CompactReplyFooter
-                            copy={<LocalMessageCopy text={() => row().text} />}
+                            copy={
+                              <LocalMessageCopy
+                                text={() => {
+                                  const value = row();
+                                  return shouldStripCitationMarkers(value)
+                                    ? stripCitationMarkers(value.text, {
+                                        streaming: isIncompleteCitationText(
+                                          value,
+                                          messageBytes(value.text),
+                                        ),
+                                      })
+                                    : value.text;
+                                }}
+                              />
+                            }
                             at={row().timestamp}
                             metrics={() => replyMetrics(row())}
                           />

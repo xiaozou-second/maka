@@ -18,27 +18,22 @@
  */
 
 import { Text } from 'nsh';
-import { shouldStripCitationMarkers, stripCitationMarkers } from './answerCitations';
+import { prepareSourceFragments } from './answerCitations';
 import type { Row } from './history';
 
 /** Canonical history and a live opening address the same original text. */
 export function SourceText(props: { row(): Row; sourceId: string }) {
   return (
     <Each
-      of={props.row().fragments ?? [{ offset: 0, text: props.row().text }]}
+      of={(() => {
+        const row = props.row();
+        return prepareSourceFragments(row, row.fragments ?? [{ offset: 0, text: row.text }]);
+      })()}
       key={(fragment) => fragment.offset}
     >
       {(fragment) => (
         <Text textSource={{ id: props.sourceId, offset: fragment().offset }}>
-          {(() => {
-            const row = props.row();
-            const text = fragment().text;
-            return shouldStripCitationMarkers(row)
-              ? stripCitationMarkers(text, {
-                  streaming: row.closedAt === null || Boolean(row.preview),
-                })
-              : text;
-          })()}
+          {fragment().text}
         </Text>
       )}
     </Each>

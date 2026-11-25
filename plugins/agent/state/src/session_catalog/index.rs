@@ -95,7 +95,10 @@ pub(crate) fn fact_message(
                     &prefix,
                 );
             let preview: String = cleaned.chars().take(160).collect();
-            (!preview.is_empty()).then(|| (fact.id.to_string(), Some(preview)))
+            Some((
+                fact.id.to_string(),
+                (!preview.is_empty()).then_some(preview),
+            ))
         }
         Fact::ExternalTaskObserved {
             task,

@@ -23,11 +23,15 @@ import type { JSX, ViewRef } from 'nsh';
 import { Button, Input } from 'nsh/base';
 import { formatDuration } from './duration';
 import { TokenCount } from './TokenCount';
-import type { Row } from './history';
+import { messageBytes, type Row } from './history';
 import { Icon } from './Icon';
 import type { ImagePreview } from './ImageThumbnail';
 import { currentLocale, tr } from './locale';
-import { shouldStripCitationMarkers, stripCitationMarkers } from './answerCitations';
+import {
+  isIncompleteCitationText,
+  shouldStripCitationMarkers,
+  stripCitationMarkers,
+} from './answerCitations';
 import { MessageRow, type MessageViewState } from './MessageRow';
 import { turnOutcome, type TurnPresentation } from './processGroups';
 import type { ToolActivity } from './toolActivity';
@@ -654,7 +658,11 @@ export function TrajectoryRecord(props: {
   const summary = () => {
     const row = props.row();
     if (row.tool) return trajectoryLabel(row);
-    const text = shouldStripCitationMarkers(row) ? stripCitationMarkers(row.text) : row.text;
+    const text = shouldStripCitationMarkers(row)
+      ? stripCitationMarkers(row.text, {
+          streaming: isIncompleteCitationText(row, messageBytes(row.text)),
+        })
+      : row.text;
     return oneLine(text);
   };
   const status = () => {

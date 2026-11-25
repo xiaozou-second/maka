@@ -24,7 +24,7 @@ import { toast } from './toastStore';
 import { cleanup, computed, inputAction, signal } from 'nsh';
 import { Clipboard } from 'nsh';
 import { useHost } from './host';
-import { stripCitationMarkers } from './answerCitations';
+import { shouldStripCitationMarkers, stripCitationMarkers } from './answerCitations';
 import { messageBytes, sameHistoryRow, type Row } from './history';
 import type { MessageMenu } from './messageMenu';
 import { IconButton } from './ui';
@@ -35,6 +35,7 @@ export type OriginalMessage = {
   role: 'user' | 'assistant';
   position: HistoryRowAddress;
   through: number;
+  stripMarkers?: boolean;
 };
 const sameMessage = (left: OriginalMessage | null, right: OriginalMessage | null) =>
   left === right ||
@@ -43,6 +44,7 @@ const sameMessage = (left: OriginalMessage | null, right: OriginalMessage | null
     left.sessionId === right.sessionId &&
     left.key === right.key &&
     left.role === right.role &&
+    Boolean(left.stripMarkers) === Boolean(right.stripMarkers) &&
     sameHistoryRow(left.position, right.position));
 
 /** The whole original text of a message, read page by page; null once it is no longer current. */
@@ -123,6 +125,7 @@ export function MessageCopy(props: {
         role: row.role,
         position: { ...row.position },
         through: row.metadataThrough ?? props.through(),
+        stripMarkers: shouldStripCitationMarkers(row),
       };
     },
     // A canonical body is immutable at its position. New metadata fences
@@ -136,9 +139,7 @@ export function MessageCopy(props: {
     try {
       const content = await readOriginal(host, original, () => owns(original));
       if (content === null) return;
-      await Clipboard.writeText(
-        original.role === 'assistant' ? stripCitationMarkers(content) : content,
-      );
+      await Clipboard.writeText(original.stripMarkers ? stripCitationMarkers(content) : content);
       if (owns(original)) {
         copied.set(true);
         if (resetTimer !== null) clearTimeout(resetTimer);

@@ -22,7 +22,9 @@ import test from 'node:test';
 import {
   answerSource,
   citationOffsets,
+  isIncompleteCitationText,
   prepareCitationText,
+  prepareSourceFragments,
   shouldStripCitationMarkers,
   stripCitationMarkers,
 } from '../app/answerCitations.ts';
@@ -193,15 +195,136 @@ test('streaming hides incomplete PUA marker tails without flickering and only st
     '保留磁盘。',
   );
 
+  // Closing emphasis/quote delimiters must not gain a trailing space that breaks CommonMark.
+  const m = '\uE200cite\uE202turn0search0\uE201';
+  assert.equal(stripCitationMarkers(`**QEMU ${m}** is fixed.`), '**QEMU** is fixed.');
+  assert.equal(stripCitationMarkers(`*QEMU ${m}*, next`), '*QEMU*, next');
+  assert.equal(stripCitationMarkers(`~~QEMU ${m}~~.`), '~~QEMU~~.');
+  assert.equal(stripCitationMarkers(`"**QEMU ${m}**".`), '"**QEMU**".');
+  assert.equal(stripCitationMarkers(`QEMU ${m}*and* more`), 'QEMU *and* more');
+
+  // Allowlist real MessageOrigin variants: never strip human-authored prompts or Room messages.
   assert.equal(shouldStripCitationMarkers({ role: 'assistant', field: 'body' }), true);
   assert.equal(shouldStripCitationMarkers({ role: 'assistant', field: 'thinking' }), false);
   assert.equal(shouldStripCitationMarkers({ role: 'user', field: 'body' }), false);
   assert.equal(
-    shouldStripCitationMarkers({ role: 'user', field: 'body', origin: { kind: 'session' } }),
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'automation', automationId: 'a1', title: 'Nightly' },
+    }),
     false,
   );
   assert.equal(
-    shouldStripCitationMarkers({ role: 'user', field: 'body', origin: { kind: 'worker' } }),
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'goal', goalId: 'g1', objective: 'Ship' },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'room', sessionId: 'r1', messageId: 'm1', author: { kind: 'human' } },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: {
+        kind: 'room',
+        sessionId: 'r1',
+        messageId: 'm2',
+        author: { kind: 'session', execution: { sessionId: 's1', runId: 'r1', turnId: 't1' } },
+      },
+    }),
     true,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'session', execution: { sessionId: 's1', runId: 'r1', turnId: 't1' } },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'session_completion', sessionId: 's1', messageId: 'm1' },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'bot_worker', sessionId: 's1' },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldStripCitationMarkers({
+      role: 'user',
+      field: 'body',
+      origin: { kind: 'discovery_report', sessionId: 's1' },
+    }),
+    true,
+  );
+
+  // Incomplete detection covers live streams, previews, and truncated historical pages.
+  assert.equal(
+    isIncompleteCitationText({ closedAt: null, preview: false, totalBytes: 10 }, 10),
+    true,
+  );
+  assert.equal(isIncompleteCitationText({ closedAt: 1, preview: true, totalBytes: 10 }, 10), true);
+  assert.equal(
+    isIncompleteCitationText({ closedAt: 1, preview: false, totalBytes: 100 }, 20),
+    true,
+  );
+  assert.equal(
+    isIncompleteCitationText({ closedAt: 1, preview: false, totalBytes: 20 }, 20),
+    false,
+  );
+
+  // Contiguous source fragments merge before stripping so cross-page markers clean cleanly,
+  // while gaps stay separate and withhold incomplete trailing markers.
+  const firstFrag = 'QEMU \uE200ci';
+  const secondFrag = 'te\uE202turn0search0\uE201 is fixed.';
+  const totalBytes = Buffer.byteLength(firstFrag + secondFrag, 'utf8');
+  assert.deepEqual(
+    prepareSourceFragments(
+      { role: 'assistant', field: 'body', closedAt: 1, preview: false, totalBytes },
+      [
+        { offset: 0, text: firstFrag },
+        { offset: Buffer.byteLength(firstFrag, 'utf8'), text: secondFrag },
+      ],
+    ),
+    [{ offset: 0, text: 'QEMU is fixed.' }],
+  );
+  assert.deepEqual(
+    prepareSourceFragments(
+      { role: 'assistant', field: 'body', closedAt: 1, preview: false, totalBytes: 200 },
+      [
+        { offset: 0, text: firstFrag },
+        { offset: 120, text: 'tail' },
+      ],
+    ),
+    [
+      { offset: 0, text: 'QEMU' },
+      { offset: 120, text: 'tail' },
+    ],
+  );
+  assert.deepEqual(
+    prepareSourceFragments(
+      { role: 'user', field: 'body', closedAt: 1, preview: false, totalBytes },
+      [{ offset: 0, text: firstFrag }],
+    ),
+    [{ offset: 0, text: firstFrag }],
   );
 });

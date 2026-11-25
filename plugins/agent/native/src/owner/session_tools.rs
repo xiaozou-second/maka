@@ -144,15 +144,47 @@ fn tool_result_path(session_id: &str, position: &HistoryRowAddress) -> Option<St
     }
 }
 
+fn chunks_to_entries(
+    session_id: &str,
+    chunks: Vec<HistoryChunk>,
+    raw: bool,
+    include_thinking: bool,
+    restricted_result_rows: &crate::service::history::RestrictedToolResultRows,
+) -> Vec<AgentTranscriptEntry> {
+    let mut merged: Vec<HistoryChunk> = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        if !raw
+            && chunk.role == wire::Role::Assistant
+            && chunk.field == wire::HistoryField::Body
+            && let Some(prev) = merged.last_mut()
+            && prev.role == wire::Role::Assistant
+            && prev.field == wire::HistoryField::Body
+            && prev.position == chunk.position
+            && prev.total_bytes == chunk.total_bytes
+            && prev.offset.saturating_add(prev.text.len() as u64) == chunk.offset
+        {
+            prev.text.push_str(&chunk.text);
+            continue;
+        }
+        merged.push(chunk);
+    }
+    merged
+        .into_iter()
+        .filter_map(|c| {
+            chunk_to_entry(session_id, c, raw, include_thinking, restricted_result_rows)
+        })
+        .collect()
+}
+
 fn chunk_to_entry(
     session_id: &str,
     chunk: HistoryChunk,
-    include_byte_bounds: bool,
+    raw: bool,
     include_thinking: bool,
     restricted_result_rows: &crate::service::history::RestrictedToolResultRows,
 ) -> Option<AgentTranscriptEntry> {
-    let sliced =
-        include_byte_bounds || chunk.offset > 0 || chunk.total_bytes > chunk.text.len() as u64;
+    let raw_end = chunk.offset.saturating_add(chunk.text.len() as u64);
+    let sliced = raw || chunk.offset > 0 || raw_end < chunk.total_bytes;
     let offset = sliced.then_some(chunk.offset);
     let total_bytes = sliced.then_some(chunk.total_bytes);
     match chunk.role {
@@ -176,8 +208,12 @@ fn chunk_to_entry(
             } else {
                 "assistant"
             };
-            let text = if !sliced && chunk.field == wire::HistoryField::Body {
-                maka_presentation::strip_citation_markers(&chunk.text).into_owned()
+            let text = if !raw && chunk.field == wire::HistoryField::Body {
+                if raw_end < chunk.total_bytes {
+                    maka_presentation::strip_citation_markers_streaming(&chunk.text).into_owned()
+                } else {
+                    maka_presentation::strip_citation_markers(&chunk.text).into_owned()
+                }
             } else {
                 chunk.text
             };
@@ -874,18 +910,13 @@ impl Owner {
                             include_thinking,
                         })
                     });
-                    let items = chunks
-                        .into_iter()
-                        .filter_map(|c| {
-                            chunk_to_entry(
-                                &session_id,
-                                c,
-                                is_raw,
-                                include_thinking,
-                                &restricted_result_rows,
-                            )
-                        })
-                        .collect();
+                    let items = chunks_to_entries(
+                        &session_id,
+                        chunks,
+                        is_raw,
+                        include_thinking,
+                        &restricted_result_rows,
+                    );
                     Some(SessionTranscript::Agent {
                         items,
                         before_cursor,
@@ -1037,7 +1068,8 @@ impl Owner {
                     "# Conversation: {} (maka://session/{})\nWorkspace: {}\n\n",
                     summary.title, summary.id, summary.workspace_path
                 ));
-                let mut all_entries: Vec<AgentTranscriptEntry> = Vec::new();
+                let mut all_chunks: Vec<HistoryChunk> = Vec::new();
+                let mut all_restricted = crate::service::history::RestrictedToolResultRows::new();
                 let mut pos = wire::Position::Tail;
                 let mut older_wire_cursor = None;
                 let mut effective_through = Some(pinned_through);
@@ -1067,19 +1099,17 @@ impl Owner {
                     };
                     effective_through = page_through.or(effective_through);
                     older_wire_cursor = before;
-                    let mut batch: Vec<AgentTranscriptEntry> = chunks
-                        .into_iter()
-                        .filter_map(|c| {
-                            chunk_to_entry(session_id, c, false, false, &restricted_result_rows)
-                        })
-                        .collect();
-                    batch.extend(all_entries);
-                    all_entries = batch;
+                    all_restricted.extend(restricted_result_rows);
+                    let mut batch = chunks;
+                    batch.extend(all_chunks);
+                    all_chunks = batch;
                     let Some(cursor) = older_wire_cursor.clone() else {
                         break;
                     };
                     pos = wire::Position::Before { cursor };
                 }
+                let all_entries =
+                    chunks_to_entries(session_id, all_chunks, false, false, &all_restricted);
                 if let Some(cursor) = older_wire_cursor
                     && let Some(cur) = encode_cursor(&OpaqueSessionCursor::AgentBefore {
                         through: effective_through,
@@ -1875,4 +1905,82 @@ fn format_room_post_markdown(
     }
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant_chunk(
+        fact: maka_agent_facts::durable::FactId,
+        message_id: &str,
+        offset: u64,
+        total_bytes: u64,
+        text: &str,
+    ) -> HistoryChunk {
+        HistoryChunk {
+            imported_turn: None,
+            run_id: None,
+            model_part: None,
+            source_citation: false,
+            citation: None,
+            citation_anchor: None,
+            has_references: false,
+            quotes: vec![],
+            final_output: false,
+            reply_info: None,
+            final_answer: false,
+            model: None,
+            origin: None,
+            compaction: None,
+            attachments: vec![],
+            timing: None,
+            folded_work: None,
+            work: None,
+            field: wire::HistoryField::Body,
+            message_id: Some(message_id.into()),
+            turn_id: Some("turn-1".into()),
+            timestamp: Some(1),
+            role: wire::Role::Assistant,
+            order: wire::HistoryOrder {
+                path: vec![1],
+                item_index: 0,
+            },
+            position: wire::HistoryRowAddress::Live {
+                sequence: 1,
+                fact,
+                item_index: 0,
+            },
+            offset,
+            total_bytes,
+            text: text.into(),
+            tool: None,
+        }
+    }
+
+    #[test]
+    fn chunks_to_entries_merges_and_strips_sliced_assistant_body_unless_raw() {
+        let fact = maka_agent_facts::durable::FactId::new();
+        let part1 = "QEMU \u{E200}ci";
+        let part2 = "te\u{E202}turn0search0\u{E201} is fixed. \u{E200}ci";
+        let total = (part1.len() + part2.len() + 20) as u64;
+        let make_chunks = || {
+            vec![
+                assistant_chunk(fact, "msg-1", 0, total, part1),
+                assistant_chunk(fact, "msg-1", part1.len() as u64, total, part2),
+            ]
+        };
+        let restricted = crate::service::history::RestrictedToolResultRows::new();
+
+        let cleaned = chunks_to_entries("s1", make_chunks(), false, false, &restricted);
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].text, "QEMU is fixed.");
+        assert_eq!(cleaned[0].offset, Some(0));
+        assert_eq!(cleaned[0].total_bytes, Some(total));
+
+        let raw = chunks_to_entries("s1", make_chunks(), true, false, &restricted);
+        assert_eq!(raw.len(), 2);
+        assert_eq!(raw[0].text, part1);
+        assert_eq!(raw[1].text, part2);
+    }
 }

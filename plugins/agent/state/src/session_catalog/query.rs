@@ -488,7 +488,10 @@ impl Raw {
             (Some(tail_message_id), Some(recorded_at)) => Some(Message {
                 tail_message_id,
                 recorded_at: unsigned_integer(recorded_at)?,
-                preview: self.preview,
+                preview: self.preview.and_then(|raw| {
+                    let cleaned = maka_provider_protocol::responses::markers::strip_citation_markers_streaming(&raw);
+                    (!cleaned.is_empty()).then(|| cleaned.into_owned())
+                }),
             }),
             (None, None) => None,
             _ => return Err(invalid("catalog message index incomplete")),
@@ -773,6 +776,188 @@ mod tests {
             });
         }
         assert!(saw_single_record_query);
+        root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_preserves_tail_id_on_long_leading_marker_and_cleans_legacy_preview_on_read() {
+        use crate::ContentBlob;
+        use maka_agent_facts::{
+            durable::{
+                BackendSpec, Budget, Fact, FactId, ModelAttemptId, RecordedFact, RunId, RunOrigin,
+                RunSpec, SCHEMA_VERSION, Trigger, UnixMillis,
+            },
+            execution::ModelBinding,
+            model::{ModelPart, TextKind, body::TextBody},
+        };
+        use maka_sandbox::workspace::{BindingStamp, PermissionBasis};
+
+        let run_owner: RunOwner = serde_json::from_value(serde_json::json!({
+            "deployment": Uuid::now_v7(),
+            "namespace": []
+        }))
+        .unwrap();
+        let source = ContentBlob::new(vec![]).reference().clone();
+        let spec = RunSpec {
+            schema_version: SCHEMA_VERSION,
+            session_id: "sess-01".into(),
+            owner: run_owner.clone(),
+            turn_id: "turn-1".into(),
+            origin: RunOrigin::Local,
+            trigger: Trigger::Message {
+                message_id: "msg-0".into(),
+            },
+            workspace: "/".into(),
+            permission_basis: PermissionBasis {
+                boundary_revision: 0,
+                binding: BindingStamp {
+                    id: Uuid::now_v7(),
+                    permission_epoch: 0,
+                },
+            },
+            permission_ceiling: maka_sandbox::Permissions {
+                sandbox: maka_sandbox::Sandbox::Disabled,
+                approval: maka_sandbox::Approval::Never,
+            },
+            network_approval_ceiling: None,
+            filesystem_approval_ceiling: None,
+            backend: BackendSpec::Model {
+                binding: ModelBinding {
+                    connection_id: "conn".into(),
+                    connection_slug: "conn".into(),
+                    model: "model".into(),
+                },
+                descriptor: source.clone(),
+            },
+            collaboration: Default::default(),
+            language: Default::default(),
+            tool_discovery: false,
+            allowed_tools: None,
+            mcp_revision: None,
+            compaction_prompt: None,
+            system_prompt: source.clone(),
+            tool_selection: source.clone(),
+            input: source,
+            budget: Budget {
+                tokens: None,
+                retries: 0,
+                deadline: None,
+            },
+            budget_basis: None,
+        };
+        let long_entity = format!(
+            "\u{E200}entity\u{E202}[\"software\",\"QEMU\",\"{}\"]\u{E201} is an emulator.",
+            "x".repeat(600)
+        );
+        let fact = RecordedFact {
+            schema_version: SCHEMA_VERSION,
+            id: FactId::new(),
+            run: RunId::new(),
+            revision: 1,
+            at: UnixMillis(1),
+            fact: Fact::ModelObserved {
+                attempt: ModelAttemptId::new(),
+                index: 0,
+                continuation: None,
+                part: ModelPart::Text {
+                    text: TextBody::from(long_entity),
+                    text_kind: TextKind::Text,
+                    provider_options: None,
+                },
+            },
+        };
+        let (tail_id, preview) = super::super::fact_message(&spec, &fact)
+            .expect("long leading entity must still index tail_message_id");
+        assert_eq!(tail_id, fact.id.to_string());
+        assert_eq!(preview, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let ns = RootNamespaces {
+            ownership: dir.path().join("owners"),
+            control: dir.path().join("control"),
+        };
+        let owner = Arc::new(RootOwner::create(&dir.path().join("root"), &ns).unwrap());
+        let migrations: Vec<_> = maka_event_log::ROOT_MIGRATIONS
+            .iter()
+            .chain(crate::MIGRATIONS)
+            .copied()
+            .collect();
+        let root = RootStore::open(owner, &migrations).await.unwrap();
+        let data = root.data_writer().unwrap();
+        data.write(SeedSessions(1)).await.unwrap();
+
+        let owner_key = serde_json::to_string(&run_owner).unwrap();
+        struct SeedLegacyPreview(String);
+        impl Statement for SeedLegacyPreview {
+            type Output = ();
+            type Value = ();
+            fn execute(self, c: &Connection) -> Result<Prepared<()>, StoreError> {
+                let run = Uuid::now_v7().to_string();
+                c.execute(
+                    "INSERT INTO contents(id,content_sha256,payload) VALUES(1,'sha-legacy',CAST('{}' AS BLOB))",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_run_specs(run,schema_version,owner,session,spec_content_id)
+                     VALUES(?1,1,?2,'sess-01',1)",
+                    [&run, &self.0],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_facts(sequence,id,run,revision,schema_version,at,body_content_id)
+                     VALUES(1,'msg-legacy',?1,1,1,2000,1)",
+                    [&run],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_catalog_runs(run,owner,session,admission_sequence)
+                     VALUES(?1,?2,'sess-01',1)",
+                    [&run, &self.0],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_catalog_sessions(owner,session,last_sequence,terminal_sequence)
+                     VALUES(?1,'sess-01',1,0)",
+                    [&self.0],
+                )?;
+                c.execute(
+                    "INSERT INTO agent_catalog_messages(owner,session,sequence,message,at,preview)
+                     VALUES(?1,'sess-01',1,'msg-legacy',2000,'QEMU \u{E200}cite\u{E202}turn0search0\u{E201} is fixed.')",
+                    [&self.0],
+                )?;
+                Ok(Prepared {
+                    value: (),
+                    changed: true,
+                    notification: Notification::default(),
+                })
+            }
+            fn committed(_: ()) {}
+            fn isolated_rejection(_: &StoreError) -> bool {
+                false
+            }
+        }
+        data.write(SeedLegacyPreview(owner_key)).await.unwrap();
+
+        let catalog = SessionCatalog::new(data, run_owner, "sess-".into()).unwrap();
+        let filter = Filter {
+            base: CatalogFilter {
+                roots_only: false,
+                archived_only: false,
+                include_archived: true,
+            },
+            needs_you_only: false,
+            room: None,
+        };
+        let page = catalog
+            .page(CatalogScope::Profile, None, Position::Start, filter, 10)
+            .await
+            .unwrap();
+        let record = page
+            .sessions
+            .into_iter()
+            .find(|s| s.metadata.id == "sess-01")
+            .expect("sess-01");
+        assert_eq!(
+            record.last_message.and_then(|m| m.preview).as_deref(),
+            Some("QEMU is fixed.")
+        );
         root.close().await.unwrap();
     }
 }

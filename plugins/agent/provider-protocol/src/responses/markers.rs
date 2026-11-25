@@ -110,6 +110,25 @@ fn is_trailing_punctuation(ch: char) -> bool {
     )
 }
 
+fn is_closing_delimiter(text: &str, mut at: usize) -> bool {
+    let mut matched = false;
+    while let Some(delim) = text[at..]
+        .chars()
+        .next()
+        .filter(|&c| matches!(c, '*' | '_' | '~' | '"' | '\'' | '”' | '’'))
+    {
+        matched = true;
+        while text[at..].starts_with(delim) {
+            at += delim.len_utf8();
+        }
+    }
+    matched
+        && text[at..]
+            .chars()
+            .next()
+            .is_none_or(|c| c.is_whitespace() || is_trailing_punctuation(c))
+}
+
 fn extract_entity_display(payload: &str) -> Option<String> {
     let json_slice = payload.split(SEP).next().unwrap_or(payload);
     let value: serde_json::Value = serde_json::from_str(json_slice).ok()?;
@@ -137,19 +156,10 @@ fn parse_marker(text: &str, start: usize, streaming: bool) -> Option<Marker> {
     }
     // Reached EOF without closing U+E201.
     let end = text.len();
-    if streaming {
-        if tail.is_empty() || is_ascii_tag(tail) {
-            return Some(Marker::Remove { end });
-        }
-        if let Some((tag, _)) = tail.split_once(SEP)
-            && is_ascii_tag(tag)
-        {
-            return Some(Marker::Remove { end });
-        }
-        return None;
-    }
-    if let Some((tag, _)) = tail.split_once(SEP)
-        && is_ascii_tag(tag)
+    if (streaming && (tail.is_empty() || is_ascii_tag(tail)))
+        || tail
+            .split_once(SEP)
+            .is_some_and(|(tag, _)| is_ascii_tag(tag))
     {
         return Some(Marker::Remove { end });
     }
@@ -269,6 +279,7 @@ fn strip(text: &str, streaming: bool) -> Cow<'_, str> {
                             || c == '\r'
                             || is_horizontal_space(c)
                             || is_trailing_punctuation(c)
+                            || is_closing_delimiter(text, after_cluster)
                     }
                 };
                 if !drop_pre_space {
@@ -372,5 +383,30 @@ mod tests {
     fn preserves_markdown_indentation_and_hard_line_breaks() {
         let md = "  - item \u{E200}cite\u{E202}turn0search0\u{E201}  \n  - next";
         assert_eq!(strip_citation_markers(md), "  - item  \n  - next");
+    }
+
+    #[test]
+    fn drops_space_before_closing_markdown_delimiters_without_gluing_openers() {
+        let m = "\u{E200}cite\u{E202}turn0search0\u{E201}";
+        assert_eq!(
+            strip_citation_markers(&format!("**QEMU {m}** is fixed.")),
+            "**QEMU** is fixed."
+        );
+        assert_eq!(
+            strip_citation_markers(&format!("*QEMU {m}*, next")),
+            "*QEMU*, next"
+        );
+        assert_eq!(
+            strip_citation_markers(&format!("~~QEMU {m}~~.")),
+            "~~QEMU~~."
+        );
+        assert_eq!(
+            strip_citation_markers(&format!(r#""**QEMU {m}**"."#)),
+            r#""**QEMU**"."#
+        );
+        assert_eq!(
+            strip_citation_markers(&format!("QEMU {m}*and* more")),
+            "QEMU *and* more"
+        );
     }
 }

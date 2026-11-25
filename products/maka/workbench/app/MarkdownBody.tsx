@@ -22,6 +22,7 @@ import { TextView } from 'nsh/base';
 import { SourceChip } from './AnswerSources';
 import {
   citationOffsets,
+  isIncompleteCitationText,
   prepareCitationText,
   shouldStripCitationMarkers,
   type InlineCitation,
@@ -63,7 +64,7 @@ export function MarkdownBody(props: {
   const isStreaming = () => {
     if (props.text !== undefined) return false;
     const r = props.row();
-    return r.closedAt === null || Boolean(r.preview);
+    return isIncompleteCitationText(r, messageBytes(r.text));
   };
 
   const makeLinkGuard = () => {

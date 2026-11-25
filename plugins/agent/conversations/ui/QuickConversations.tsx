@@ -24,7 +24,8 @@ import type {
   QuickToolInput,
 } from '../../../../packages/plugin-sdk/src/workbench-views.js';
 import { createBrowsing } from '../../../../products/maka/workbench/app/browsing';
-import { isReplyWithActions } from '../../../../products/maka/workbench/app/history';
+import { stripCitationMarkers } from '../../../../products/maka/workbench/app/answerCitations';
+import { isReplyWithActions, messageBytes } from '../../../../products/maka/workbench/app/history';
 import type { Host, Output } from '../../../../products/maka/workbench/app/host';
 import { localizedKeywords, messageTime, tr } from '../../../../products/maka/workbench/app/locale';
 
@@ -108,11 +109,13 @@ async function readReply(
     if (start.kind !== 'ready') return null;
     parts = start.chunks.filter(matches);
   }
-  const text = parts
-    .map((part) => part.text)
-    .join('')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const joined = parts.map((part) => part.text).join('');
+  const last = parts[parts.length - 1];
+  const incomplete =
+    last !== undefined &&
+    last.totalBytes !== undefined &&
+    last.offset + messageBytes(last.text) < last.totalBytes;
+  const text = stripCitationMarkers(joined, { streaming: incomplete }).replace(/\s+/g, ' ').trim();
   if (!text) return null;
   return {
     text: Array.from(text).slice(0, 160).join(''),

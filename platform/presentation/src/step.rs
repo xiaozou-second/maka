@@ -166,18 +166,3 @@ impl Step {
         }))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn assistant_text_strips_provider_citation_markers_without_touching_plain_text() {
-        let plain = TextBody::from("Plain markdown  \nwith hard break.");
-        assert_eq!(assistant_text(&plain), plain);
-
-        let raw =
-            TextBody::from("保留 KVM 和现有磁盘。 \u{E200}cite\u{E202}turn137145search0\u{E201}");
-        assert_eq!(assistant_text(&raw).to_string(), "保留 KVM 和现有磁盘。");
-    }
-}

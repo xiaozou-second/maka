@@ -220,7 +220,7 @@ pub(crate) fn find_index(
     let mut next_after = None;
     let mut position = input.after;
     let mut statement = c.prepare_cached(
-        "SELECT body,fields_json FROM agent_recall_messages WHERE owner=? AND session=? AND sequence=? AND ordinal=?",
+        "SELECT body,fields_json,role FROM agent_recall_messages WHERE owner=? AND session=? AND sequence=? AND ordinal=?",
     )?;
     for (index, (sequence, ordinal, size, _)) in headers.into_iter().enumerate() {
         check(stop)?;
@@ -237,6 +237,7 @@ pub(crate) fn find_index(
         let row = rows.next()?.ok_or(StoreError::EventConflict)?;
         let mut body: String = row.get(0)?;
         let fields: Vec<FieldSpan> = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        let role: Role = serde_json::from_str(&row.get::<_, String>(2)?)?;
         position = Some(locator);
         if let Some(spans) = restrictions.get(&index) {
             if spans.iter().any(|&(a, b)| a == 0 && b >= body.len() as u64) {
@@ -254,7 +255,12 @@ pub(crate) fn find_index(
             let text = body.get(span.start..span.end).ok_or_else(|| {
                 invalid("Recall source field span corrupt; explicit rebuild required")
             })?;
-            if let Some(preview) = preview(text, &matcher) {
+            let visible = if role == Role::Assistant && span.field == Field::Body {
+                maka_provider_protocol::responses::markers::strip_citation_markers(text)
+            } else {
+                std::borrow::Cow::Borrowed(text)
+            };
+            if let Some(preview) = preview(&visible, &matcher) {
                 matches.push(Found {
                     position: locator,
                     field: span.field,
@@ -487,4 +493,183 @@ pub(crate) fn landmark_ranks(total: u64, limit: u32) -> Vec<u64> {
                 / u128::from(limit - 1)) as u64
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recall::{Field, FieldSpan, Role};
+    use maka_agent_facts::{durable::FactId, memory::MemorySource};
+    use uuid::Uuid;
+
+    #[test]
+    fn find_index_cleans_assistant_body_after_masking_and_keeps_user_raw() {
+        let db = Connection::open_in_memory().unwrap();
+        let migrations: Vec<_> = maka_event_log::ROOT_MIGRATIONS
+            .iter()
+            .chain(crate::MIGRATIONS)
+            .copied()
+            .collect();
+        maka_event_log::migration::run(&db, &migrations).unwrap();
+
+        let owner = RunOwner {
+            deployment: Uuid::now_v7(),
+            namespace: maka_plugin_core::composition::InstanceId(vec![]),
+        };
+        let owner_key = serde_json::to_string(&owner).unwrap();
+        let run = RunId::new();
+        let session = "search-clean";
+        let assistant_fact = FactId::new();
+        let user_fact = FactId::new();
+        let assistant_body = "secret and QEMU \u{E200}cite\u{E202}turn0search0\u{E201} is fixed.";
+        let user_body = "User pasted QEMU \u{E200}cite\u{E202}turn0search0\u{E201} verbatim.";
+
+        db.execute(
+            "INSERT INTO contents(id,content_sha256,payload) VALUES(1,'sha-find',CAST('{}' AS BLOB))",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agent_run_specs(run,schema_version,owner,session,spec_content_id)
+             VALUES(?1,1,?2,?3,1)",
+            params![run.to_string(), owner_key, session],
+        )
+        .unwrap();
+
+        let seed = |seq: i64, fact: FactId, role: Role, body: &str| {
+            db.execute(
+                "INSERT INTO agent_facts(sequence,id,run,revision,schema_version,at,body_content_id)
+                 VALUES(?1,?2,?3,?1,1,1,1)",
+                params![seq, fact.to_string(), run.to_string()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO agent_session_history(owner,session,sequence,run,admission_sequence,kind,prefix_digest,tool_start,opening_message,fact_id,result_source)
+                 VALUES(?1,?2,?3,?4,1,'model_observed','d',0,0,?5,0)",
+                params![owner_key, session, seq, run.to_string(), fact.to_string()],
+            )
+            .unwrap();
+            let fields = serde_json::to_string(&[FieldSpan {
+                field: Field::Body,
+                start: 0,
+                end: body.len(),
+                internal: false,
+            }])
+            .unwrap();
+            let folded = fold(body);
+            db.execute(
+                "INSERT INTO agent_recall_messages(owner,session,sequence,ordinal,run,turn,message,at,role,body,folded,attachments,references_json,fields_json,internal)
+                 VALUES(?1,?2,?3,0,?4,'t1',?5,1,?6,?7,?8,'[]','[]',?9,0)",
+                params![
+                    owner_key,
+                    session,
+                    seq,
+                    run.to_string(),
+                    format!("m-{seq}"),
+                    serde_json::to_string(&role).unwrap(),
+                    body,
+                    folded,
+                    fields,
+                ],
+            )
+            .unwrap();
+            let rowid = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO agent_recall_terms(rowid,grams) VALUES(?1,?2)",
+                params![rowid, terms::grams(&folded)],
+            )
+            .unwrap();
+        };
+        seed(1, assistant_fact, Role::Assistant, assistant_body);
+        seed(2, user_fact, Role::User, user_body);
+
+        // Restrict bytes 0..6 ("secret") on the assistant row using original raw coordinates.
+        let mem_id = Uuid::new_v4().to_string();
+        let user_src = serde_json::to_string(&MemorySource::UserOperation {
+            operation_id: Uuid::new_v4(),
+            observed_at: 0,
+        })
+        .unwrap();
+        let conv_src = serde_json::json!({
+            "kind": "conversation",
+            "reference": {
+                "sessionId": session,
+                "sequence": 1,
+                "factId": assistant_fact.to_string(),
+                "itemIndex": 0,
+                "start": 0,
+                "end": 6,
+                "quote": "secret",
+                "fingerprint": "fp"
+            }
+        })
+        .to_string();
+        db.execute(
+            "INSERT INTO agent_memories VALUES(?1,'personal',?2,1,1,'user_recall','suppressed',0,0)",
+            params![owner_key, mem_id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agent_memory_versions(namespace,scope,id,revision,body,source,digest,disposition)
+             VALUES(?1,'personal',?2,1,'secret',?3,'digest','suppressed')",
+            params![owner_key, mem_id, user_src],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agent_memory_evidence(namespace,scope,id,assertion,source,source_key)
+             VALUES(?1,'personal',?2,1,?3,'ev-1')",
+            params![owner_key, mem_id, conv_src],
+        )
+        .unwrap();
+
+        let cut = HistoryCut {
+            owner: owner.clone(),
+            session: session.into(),
+            through_sequence: 2,
+            digest: "d".into(),
+        };
+        let stop = CancellationToken::new();
+
+        let (secret_hits, _) = find_index(
+            &db,
+            &owner_key,
+            &cut,
+            Find {
+                query: "secret".into(),
+                case_sensitive: true,
+                whole_word: false,
+                include_internal: false,
+                after: None,
+            },
+            &stop,
+            0,
+            Some(&owner),
+            &mut FindWork::default(),
+        )
+        .unwrap();
+        assert!(secret_hits.matches.is_empty(), "restricted bytes leaked");
+
+        let (qemu_hits, _) = find_index(
+            &db,
+            &owner_key,
+            &cut,
+            Find {
+                query: "QEMU".into(),
+                case_sensitive: true,
+                whole_word: false,
+                include_internal: false,
+                after: None,
+            },
+            &stop,
+            0,
+            Some(&owner),
+            &mut FindWork::default(),
+        )
+        .unwrap();
+        assert_eq!(qemu_hits.matches.len(), 2);
+        assert!(qemu_hits.matches[0].preview.contains("QEMU is fixed."));
+        assert!(!qemu_hits.matches[0].preview.contains('\u{E200}'));
+        assert!(!qemu_hits.matches[0].preview.contains("secret"));
+        assert!(qemu_hits.matches[1].preview.contains("\u{E200}cite"));
+    }
 }

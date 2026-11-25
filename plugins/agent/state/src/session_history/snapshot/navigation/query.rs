@@ -131,7 +131,7 @@ impl Query for FindQuery {
             " AND f.internal=0"
         };
         let mut sql = format!(
-            "SELECT d.id,{POSITION_JSON},COALESCE((SELECT SUM(f.bytes) FROM agent_history_snapshot_nav_fields f WHERE f.document=d.id{fields_visible}),0) FROM agent_history_snapshot_nav_documents d JOIN agent_history_snapshot_positions p ON p.snapshot=d.snapshot AND p.kind=d.kind AND p.major=d.major AND p.minor=d.minor WHERE d.snapshot=?1 AND (d.major,d.minor)>(?2,?3) AND (p.kind='imported' OR p.admission_sequence>?4){visible} AND d.role<>'\"compaction\"'",
+            "SELECT d.id,{POSITION_JSON},COALESCE((SELECT SUM(f.bytes) FROM agent_history_snapshot_nav_fields f WHERE f.document=d.id{fields_visible}),0),d.role FROM agent_history_snapshot_nav_documents d JOIN agent_history_snapshot_positions p ON p.snapshot=d.snapshot AND p.kind=d.kind AND p.major=d.major AND p.minor=d.minor WHERE d.snapshot=?1 AND (d.major,d.minor)>(?2,?3) AND (p.kind='imported' OR p.admission_sequence>?4){visible} AND d.role<>'\"compaction\"'",
         );
         if grams.is_some() {
             sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM agent_history_snapshot_nav_chunks k JOIN agent_history_snapshot_nav_fields f ON f.document=k.document AND f.ordinal=k.field_ordinal JOIN agent_history_snapshot_nav_terms t ON t.rowid=k.id WHERE k.document=d.id{fields_visible} AND agent_history_snapshot_nav_terms MATCH ?5)"));
@@ -166,14 +166,19 @@ impl Query for FindQuery {
         };
         let rows = headers
             .into_iter()
-            .map(|(id, raw, bytes)| {
-                Ok((id, serde_json::from_str::<SnapshotPosition>(&raw)?, bytes))
+            .map(|(id, raw, bytes, role)| {
+                Ok((
+                    id,
+                    serde_json::from_str::<SnapshotPosition>(&raw)?,
+                    bytes,
+                    serde_json::from_str::<crate::recall::Role>(&role)?,
+                ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
         let restrictions = if input.mask_evidence {
             let mut canonical = Vec::new();
             let mut imported = Vec::new();
-            for (index, (_, row, _)) in rows.iter().enumerate() {
+            for (index, (_, row, _, _)) in rows.iter().enumerate() {
                 match row {
                     SnapshotPosition::Canonical {
                         fact, item_index, ..
@@ -193,7 +198,7 @@ impl Query for FindQuery {
         let mut processed = 0;
         let mut work = input.work;
         let mut last = None;
-        for (index, (id, row, bytes)) in rows.iter().enumerate() {
+        for (index, (id, row, bytes, role)) in rows.iter().enumerate() {
             check(&stop)?;
             let spans = restrictions.get(&index);
             let bytes =
@@ -258,9 +263,18 @@ impl Query for FindQuery {
                 if spans.iter().any(|&(a, b)| a <= start && b >= start + bytes) {
                     continue;
                 }
-                if let Some(preview) =
-                    search_field(c, &chunks, &matcher, &input.query, start, spans, &stop)?
-                {
+                let clean_assistant_body =
+                    *role == crate::recall::Role::Assistant && field == Field::Body;
+                if let Some(preview) = search_field(
+                    c,
+                    &chunks,
+                    &matcher,
+                    &input.query,
+                    start,
+                    spans,
+                    clean_assistant_body,
+                    &stop,
+                )? {
                     if let Some((body, start)) = proof
                         && !body.matches(c, &chunks, start, &stop)?
                     {
@@ -291,8 +305,8 @@ impl Query for FindQuery {
         })
     }
 }
-fn header(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, i64)> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+fn header(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, i64, String)> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
 }
 impl IndexedBody<'_> {
     fn field_start(&self, chunks: &FieldChunks, field: Field, internal: bool) -> Option<u64> {
@@ -339,6 +353,7 @@ struct FieldChunks {
     ordinal: i64,
     bytes: u64,
 }
+#[allow(clippy::too_many_arguments)]
 fn search_field(
     c: &Connection,
     chunks: &FieldChunks,
@@ -346,6 +361,7 @@ fn search_field(
     query: &str,
     start_byte: u64,
     spans: &[(u64, u64)],
+    clean_assistant_body: bool,
     stop: &CancellationToken,
 ) -> Result<Option<String>, StoreError> {
     let FieldChunks {
@@ -382,28 +398,39 @@ fn search_field(
             ));
         }
         let eof = offset + window.len() as u64 == expected;
+        let visible: std::borrow::Cow<'_, str> = if clean_assistant_body {
+            if eof {
+                maka_provider_protocol::responses::markers::strip_citation_markers(&window)
+            } else {
+                maka_provider_protocol::responses::markers::strip_citation_markers_streaming(
+                    &window,
+                )
+            }
+        } else {
+            std::borrow::Cow::Borrowed(&window)
+        };
         let start = if offset > 0 {
-            window.chars().next().map_or(0, char::len_utf8)
+            visible.chars().next().map_or(0, char::len_utf8)
         } else {
             0
         };
-        if let Some(found) = matcher.find_at(&window, start)
+        if let Some(found) = matcher.find_at(&visible, start)
             && (eof
-                || (found.end().saturating_add(4) <= window.len()
-                    && found.start().saturating_add(378) <= window.len()))
+                || (found.end().saturating_add(4) <= visible.len()
+                    && found.start().saturating_add(378) <= visible.len()))
         {
-            let begin = window.floor_char_boundary(found.start().saturating_sub(64));
-            let end = window.floor_char_boundary((begin + 378).min(window.len()));
+            let begin = visible.floor_char_boundary(found.start().saturating_sub(64));
+            let end = visible.floor_char_boundary((begin + 378).min(visible.len()));
             let mut preview = String::new();
             if offset > 0 || begin > 0 {
                 preview.push('…');
             }
             preview.extend(
-                window[begin..end]
+                visible[begin..end]
                     .chars()
                     .map(|c| if c.is_control() { ' ' } else { c }),
             );
-            if !eof || end < window.len() {
+            if !eof || end < visible.len() {
                 preview.push('…');
             }
             return Ok(Some(preview));
@@ -529,5 +556,45 @@ fn matching_preview_requires_the_entire_original_field() -> Result<(), StoreErro
         [],
     )?;
     assert!(body.matches(&c, &chunks, start, &stop)?);
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn search_field_cleans_assistant_body_after_masking_and_leaves_user_raw() -> Result<(), StoreError>
+{
+    let c = Connection::open_in_memory()?;
+    let raw = "secret and QEMU \u{E200}cite\u{E202}turn0search0\u{E201} is fixed.";
+    c.execute_batch(
+        "CREATE TABLE agent_history_snapshot_nav_chunks(document,field_ordinal,ordinal,body);",
+    )?;
+    c.execute(
+        "INSERT INTO agent_history_snapshot_nav_chunks VALUES (1,0,0,?1)",
+        [raw],
+    )?;
+    let chunks = FieldChunks {
+        document: 1,
+        ordinal: 0,
+        bytes: raw.len() as u64,
+    };
+    let stop = CancellationToken::new();
+    let qemu = RegexBuilder::new("QEMU").build().unwrap();
+    let secret = RegexBuilder::new("secret").build().unwrap();
+    let restricted = [(0u64, 6u64)];
+
+    assert_eq!(
+        search_field(&c, &chunks, &secret, "secret", 0, &restricted, true, &stop)?,
+        None,
+        "restricted bytes must be masked before matching/cleaning"
+    );
+    let assistant_hit = search_field(&c, &chunks, &qemu, "QEMU", 0, &restricted, true, &stop)?
+        .expect("assistant hit");
+    assert!(assistant_hit.contains("QEMU is fixed."), "{assistant_hit}");
+    assert!(!assistant_hit.contains('\u{E200}'), "{assistant_hit}");
+    assert!(!assistant_hit.contains("secret"), "{assistant_hit}");
+
+    let user_hit =
+        search_field(&c, &chunks, &qemu, "QEMU", 0, &[], false, &stop)?.expect("user hit");
+    assert!(user_hit.contains("\u{E200}cite"), "{user_hit}");
     Ok(())
 }
